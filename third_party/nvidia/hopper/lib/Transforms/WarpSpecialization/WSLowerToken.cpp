@@ -30,8 +30,8 @@ namespace mlir {
 static const int WARPS_PER_TASK = 4;
 static const int THREADS_PER_TASK = 128;
 
-Value getMBarrierPhaseBit(OpBuilder &builder, Operation *op,
-                          bool emptyBarrier) {
+static Value getMBarrierPhaseBit(OpBuilder &builder, Operation *op,
+                                 bool emptyBarrier) {
   auto loc = op->getLoc();
   assert(isa<ttnvws::ProducerAcquireOp>(op) || isa<ttnvws::ConsumerWaitOp>(op));
   Value curPhase;
@@ -48,8 +48,9 @@ Value getMBarrierPhaseBit(OpBuilder &builder, Operation *op,
   return curPhase;
 }
 
-void processProducerAcquireOp(OpBuilder &builder, ttnvws::ProducerAcquireOp op,
-                              Value bufferEmpty) {
+static void processProducerAcquireOp(OpBuilder &builder,
+                                     ttnvws::ProducerAcquireOp op,
+                                     Value bufferEmpty) {
   auto loc = op.getLoc();
   Value phase = getMBarrierPhaseBit(builder, op, true);
   auto i32Ty = builder.getIntegerType(32);
@@ -59,9 +60,11 @@ void processProducerAcquireOp(OpBuilder &builder, ttnvws::ProducerAcquireOp op,
   setAsyncTaskIds(waitOp, getAsyncTaskIds(op.getOperation()));
 }
 
-void processProducerCommitOp(OpBuilder &builder, ttnvws::ProducerCommitOp op,
-                             Value bufferFull, ttnvws::TokenLoadType loadType,
-                             unsigned fullCnt) {
+static void processProducerCommitOp(OpBuilder &builder,
+                                    ttnvws::ProducerCommitOp op,
+                                    Value bufferFull,
+                                    ttnvws::TokenLoadType loadType,
+                                    unsigned fullCnt) {
   auto loc = op.getLoc();
   ttng::ArriveBarrierOp arriveOp;
 
@@ -77,8 +80,8 @@ void processProducerCommitOp(OpBuilder &builder, ttnvws::ProducerCommitOp op,
   setAsyncTaskIds(arriveOp, getAsyncTaskIds(op.getOperation()));
 }
 
-void processConsumerWaitOp(OpBuilder &builder, ttnvws::ConsumerWaitOp op,
-                           Value bufferFull) {
+static void processConsumerWaitOp(OpBuilder &builder, ttnvws::ConsumerWaitOp op,
+                                  Value bufferFull) {
   auto loc = op.getLoc();
   Value phase = getMBarrierPhaseBit(builder, op, false);
   auto i32Ty = builder.getIntegerType(32);
@@ -88,9 +91,10 @@ void processConsumerWaitOp(OpBuilder &builder, ttnvws::ConsumerWaitOp op,
   setAsyncTaskIds(waitOp, getAsyncTaskIds(op.getOperation()));
 }
 
-void processConsumerReleaseOp(OpBuilder &builder, ttnvws::ConsumerReleaseOp op,
-                              Value bufferEmpty, int numCTAs,
-                              unsigned emptyCnt) {
+static void processConsumerReleaseOp(OpBuilder &builder,
+                                     ttnvws::ConsumerReleaseOp op,
+                                     Value bufferEmpty, int numCTAs,
+                                     unsigned emptyCnt) {
   auto loc = op.getLoc();
   auto arriveOp =
       ttng::ArriveBarrierOp::create(builder, loc, bufferEmpty, emptyCnt);
@@ -98,8 +102,8 @@ void processConsumerReleaseOp(OpBuilder &builder, ttnvws::ConsumerReleaseOp op,
   setAsyncTaskIds(arriveOp, getAsyncTaskIds(op.getOperation()));
 }
 
-void lowerTokenOperations(Operation *parentOp, int numCTAs,
-                          int numConsumerGroups) {
+static void lowerTokenOperations(Operation *parentOp, int numCTAs,
+                                 int numConsumerGroups) {
   SmallVector<Operation *> deprecatedOps;
   SmallVector<Operation *> deprecatedTokenOps;
   DenseSet<Operation *> warpSpecOps;
