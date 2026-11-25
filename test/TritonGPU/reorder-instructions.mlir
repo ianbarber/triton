@@ -204,3 +204,137 @@ module attributes {"ttg.num-warps" = 4 : i32, "ttg.num-ctas" = 1 : i32, "ttg.thr
     tt.return
   }
 }
+
+// -----
+
+// Check that a local_load is sunk down to its user when the tile it loads
+// would otherwise sit in registers while another tensor is loaded from global
+// memory. %BD stays where it is: no tt.load lies between it and its user.
+// CHECK-LABEL: sink_local_load_past_load
+//       CHECK: %[[AS:.+]] = ttg.local_alloc
+//  CHECK-NEXT: %[[B:.+]] = tt.load
+//  CHECK-NEXT: %[[BS:.+]] = ttg.local_alloc %[[B]]
+//  CHECK-NEXT: %[[BD:.+]] = ttg.local_load %[[BS]]
+//  CHECK-NEXT: %[[AD:.+]] = ttg.local_load %[[AS]]
+//  CHECK-NEXT: %[[A2:.+]] = arith.mulf %[[AD]]
+//  CHECK-NEXT: %[[B2:.+]] = arith.mulf %[[BD]]
+//  CHECK-NEXT: tt.dot %[[A2]], %[[B2]]
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 4], order = [0, 1]}>
+#mma = #ttg.nvidia_mma<{versionMajor = 2, versionMinor = 0, warpsPerCTA = [2, 2], instrShape = [16, 8]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 4, order = [0, 1]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @sink_local_load_past_load(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked>, %arg1: tensor<32x32x!tt.ptr<f32>, #blocked>) {
+    %cst = arith.constant dense<0.000000e+00> : tensor<32x32xf32, #mma>
+    %sa = arith.constant dense<2.000000e+00> : tensor<32x32xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>>
+    %sb = arith.constant dense<3.000000e+00> : tensor<32x32xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>>
+    %A = tt.load %arg0 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    %AS = ttg.local_alloc %A : (tensor<32x32xf32, #blocked>) -> !ttg.memdesc<32x32xf32, #shared, #smem>
+    %AD = ttg.local_load %AS : !ttg.memdesc<32x32xf32, #shared, #smem> -> tensor<32x32xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>>
+    %B = tt.load %arg1 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    %BS = ttg.local_alloc %B : (tensor<32x32xf32, #blocked>) -> !ttg.memdesc<32x32xf32, #shared, #smem>
+    %BD = ttg.local_load %BS : !ttg.memdesc<32x32xf32, #shared, #smem> -> tensor<32x32xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>>
+    %A2 = arith.mulf %AD, %sa : tensor<32x32xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>>
+    %B2 = arith.mulf %BD, %sb : tensor<32x32xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>>
+    %12 = tt.dot %A2, %B2, %cst, inputPrecision = tf32 : tensor<32x32xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>> * tensor<32x32xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>> -> tensor<32x32xf32, #mma>
+    %13 = ttg.convert_layout %12 : tensor<32x32xf32, #mma> -> tensor<32x32xf32, #blocked>
+    tt.store %arg0, %13 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// Check that a local_load feeding tt.dot directly is not sunk past a tt.load.
+// CHECK-LABEL: local_load_for_dot_not_sunk
+//       CHECK: %[[AS:.+]] = ttg.local_alloc
+//  CHECK-NEXT: %[[AD:.+]] = ttg.local_load %[[AS]]
+//  CHECK-NEXT: tt.load
+//       CHECK: tt.dot %[[AD]]
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 4], order = [0, 1]}>
+#mma = #ttg.nvidia_mma<{versionMajor = 2, versionMinor = 0, warpsPerCTA = [2, 2], instrShape = [16, 8]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 4, order = [0, 1]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @local_load_for_dot_not_sunk(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked>, %arg1: tensor<32x32x!tt.ptr<f32>, #blocked>) {
+    %cst = arith.constant dense<0.000000e+00> : tensor<32x32xf32, #mma>
+    %A = tt.load %arg0 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    %AS = ttg.local_alloc %A : (tensor<32x32xf32, #blocked>) -> !ttg.memdesc<32x32xf32, #shared, #smem>
+    %AD = ttg.local_load %AS : !ttg.memdesc<32x32xf32, #shared, #smem> -> tensor<32x32xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>>
+    %B = tt.load %arg1 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    %BS = ttg.local_alloc %B : (tensor<32x32xf32, #blocked>) -> !ttg.memdesc<32x32xf32, #shared, #smem>
+    %BD = ttg.local_load %BS : !ttg.memdesc<32x32xf32, #shared, #smem> -> tensor<32x32xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>>
+    %12 = tt.dot %AD, %BD, %cst, inputPrecision = tf32 : tensor<32x32xf32, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 1}>> * tensor<32x32xf32, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 1}>> -> tensor<32x32xf32, #mma>
+    %13 = ttg.convert_layout %12 : tensor<32x32xf32, #mma> -> tensor<32x32xf32, #blocked>
+    tt.store %arg0, %13 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// Check that a local_load is not sunk past a store to shared memory.
+// CHECK-LABEL: local_load_cannot_sink_past_store
+//       CHECK: %[[OLD:.+]] = ttg.local_load
+//  CHECK-NEXT: %[[X:.+]] = tt.load
+//  CHECK-NEXT: ttg.local_store %[[X]]
+//  CHECK-NEXT: arith.mulf %[[OLD]]
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 4], order = [0, 1]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 4, order = [0, 1]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @local_load_cannot_sink_past_store(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked>, %arg1: tensor<32x32xf32, #blocked>) -> tensor<32x32xf32, #blocked> {
+    %buf = ttg.local_alloc : () -> !ttg.memdesc<32x32xf32, #shared, #smem, mutable>
+    ttg.local_store %arg1, %buf : tensor<32x32xf32, #blocked> -> !ttg.memdesc<32x32xf32, #shared, #smem, mutable>
+    %old = ttg.local_load %buf : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32xf32, #blocked>
+    %x = tt.load %arg0 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    ttg.local_store %x, %buf : tensor<32x32xf32, #blocked> -> !ttg.memdesc<32x32xf32, #shared, #smem, mutable>
+    %y = arith.mulf %old, %arg1 : tensor<32x32xf32, #blocked>
+    tt.return %y : tensor<32x32xf32, #blocked>
+  }
+}
+
+// -----
+
+// Check that a local_load is not sunk past the dealloc of its buffer.
+// CHECK-LABEL: local_load_cannot_sink_past_dealloc
+//       CHECK: %[[V:.+]] = ttg.local_load
+//  CHECK-NEXT: %[[X:.+]] = tt.load
+//  CHECK-NEXT: ttg.local_dealloc
+//  CHECK-NEXT: arith.mulf %[[V]], %[[X]]
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 4], order = [0, 1]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 4, order = [0, 1]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @local_load_cannot_sink_past_dealloc(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked>, %arg1: tensor<32x32xf32, #blocked>) -> tensor<32x32xf32, #blocked> {
+    %buf = ttg.local_alloc : () -> !ttg.memdesc<32x32xf32, #shared, #smem, mutable>
+    ttg.local_store %arg1, %buf : tensor<32x32xf32, #blocked> -> !ttg.memdesc<32x32xf32, #shared, #smem, mutable>
+    %v = ttg.local_load %buf : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32xf32, #blocked>
+    %x = tt.load %arg0 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    ttg.local_dealloc %buf : !ttg.memdesc<32x32xf32, #shared, #smem, mutable>
+    %y = arith.mulf %v, %x : tensor<32x32xf32, #blocked>
+    tt.return %y : tensor<32x32xf32, #blocked>
+  }
+}
+
+// -----
+
+// Check that a local_load with more than one use is not sunk.
+// CHECK-LABEL: local_load_multi_use_not_sunk
+//       CHECK: %[[V:.+]] = ttg.local_load
+//  CHECK-NEXT: %[[X:.+]] = tt.load
+//  CHECK-NEXT: %[[Y:.+]] = arith.mulf %[[V]], %[[X]]
+//  CHECK-NEXT: arith.addf %[[V]], %[[Y]]
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 4], order = [0, 1]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 4, order = [0, 1]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @local_load_multi_use_not_sunk(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked>, %arg1: tensor<32x32xf32, #blocked>) -> tensor<32x32xf32, #blocked> {
+    %buf = ttg.local_alloc %arg1 : (tensor<32x32xf32, #blocked>) -> !ttg.memdesc<32x32xf32, #shared, #smem>
+    %v = ttg.local_load %buf : !ttg.memdesc<32x32xf32, #shared, #smem> -> tensor<32x32xf32, #blocked>
+    %x = tt.load %arg0 : tensor<32x32x!tt.ptr<f32>, #blocked>
+    %y = arith.mulf %v, %x : tensor<32x32xf32, #blocked>
+    %z = arith.addf %v, %y : tensor<32x32xf32, #blocked>
+    tt.return %z : tensor<32x32xf32, #blocked>
+  }
+}

@@ -72,6 +72,34 @@ static bool crossWriteSideEffectingOp(Operation *start, Operation *end) {
   return true;
 }
 
+// Return true if `op` may write or free memory, or has unknown effects.
+static bool mayWriteOrFree(Operation *op) {
+  auto effects = getEffectsRecursively(op);
+  if (!effects)
+    return true;
+  return llvm::any_of(*effects, [](MemoryEffects::EffectInstance effect) {
+    return !isa<MemoryEffects::Read, MemoryEffects::Allocate>(
+        effect.getEffect());
+  });
+}
+
+// Return true if `load` should be sunk to just before `user`, an op that
+// follows it in the same block. It should when a tt.load sits between them,
+// so that the loaded value does not occupy registers while another tensor is
+// brought in from global memory, and it can when nothing in between may
+// change or free what `load` reads.
+static bool shouldSinkToUser(triton::gpu::LocalLoadOp load, Operation *user) {
+  bool crossesLoad = false;
+  for (Operation *op = load->getNextNode(); op != user;
+       op = op->getNextNode()) {
+    assert(op && "user does not follow load in its block");
+    if (mayWriteOrFree(op))
+      return false;
+    crossesLoad |= isa<triton::LoadOp>(op);
+  }
+  return crossesLoad;
+}
+
 class TritonGPUReorderInstructionsPass
     : public impl::TritonGPUReorderInstructionsBase<
           TritonGPUReorderInstructionsPass> {
@@ -123,6 +151,21 @@ public:
     });
     for (auto &kv : opToMove)
       kv.first->moveBefore(kv.second);
+    // Within a block, sink a single-use local_load down to its user when it
+    // would otherwise hold its value in registers across a tt.load. A load
+    // that feeds tt.dot directly is left to the operand ordering below.
+    SmallVector<std::pair<Operation *, Operation *>> loadsToSink;
+    m.walk([&](triton::gpu::LocalLoadOp load) {
+      if (!load->hasOneUse())
+        return;
+      Operation *user = *load->user_begin();
+      if (user->getBlock() != load->getBlock() || isa<triton::DotOp>(user))
+        return;
+      if (shouldSinkToUser(load, user))
+        loadsToSink.push_back({load, user});
+    });
+    for (auto [load, user] : loadsToSink)
+      load->moveBefore(user);
     // Move alloc(load) immediately after dependent load
     m.walk([&](triton::gpu::LocalAllocOp op) {
       if (!op.getSrc())
